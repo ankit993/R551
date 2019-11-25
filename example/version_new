@@ -1,0 +1,1355 @@
+#include <FS.h>
+#include <DNSServer.h>
+#include <WiFiManager.h>
+#include <ESP8266WebServer.h>
+#include <PubSubClient.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266Ping.h>
+#include <ArduinoJson.h>
+#include <ESP8266WiFi.h>
+
+#include <SoftwareSerial.h>
+#include <FPM.h>
+
+#include <Adafruit_NeoPixel.h>
+
+#define PIN            0
+
+// How many Neostrip are attached to the Arduino?
+#define NUMstrip      1
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUMstrip, PIN, NEO_GRB + NEO_KHZ800);
+SoftwareSerial fserial(4, 5);
+FPM finger(&fserial);
+FPM_System_Params params;
+String msg = "hello";
+//#define ssid2 "AndroidAPE479"
+
+uint16_t last_finger = 501;
+uint16_t last_finger_sec = 502;
+int counter;
+String clientId = "weo-"; // Add different clientID for each MCU
+
+const char* mqtt_server = "35.193.200.242";//"192.168.0.117";//
+char mqtt_topic[34] = "";
+const char* mqtt_pub = "finger_test";
+//flag for saving data
+bool shouldSaveConfig = false;
+
+//callback notifying us of the need to save config
+void saveConfigCallback () {
+  Serial.println("Should save config");
+  shouldSaveConfig = true;
+}
+
+WiFiClient wifiClient;
+PubSubClient client(mqtt_server , 1883, wifiClient); // 1883 is the listener port for the Broker
+WiFiManager wifiManager;
+#define ssid wifiManager.getSSID()
+#define pwd wifiManager.getPassword()
+
+void setup_wifi() {
+  Serial.println("mounting FS...");
+  if (SPIFFS.begin()) {
+    Serial.println("mounted file system");
+    if (SPIFFS.exists("/config.json")) {
+      //file exists, reading and loading
+      Serial.println("reading config file");
+      File configFile = SPIFFS.open("/config.json", "r");
+      if (configFile) {
+        Serial.println("opened config file");
+        size_t size = configFile.size();
+        // Allocate a buffer to store contents of the file.
+        std::unique_ptr<char[]> buf(new char[size]);
+
+        configFile.readBytes(buf.get(), size);
+        DynamicJsonBuffer jsonBuffer;
+        JsonObject& json = jsonBuffer.parseObject(buf.get());
+        json.printTo(Serial);
+        if (json.success()) {
+          Serial.println("\nparsed json");
+          strcpy(mqtt_topic, json["mqtt_topic"]);
+        } else {
+          Serial.println("failed to load json config");
+        }
+        configFile.close();
+      }
+    }
+  } else {
+    Serial.println("failed to mount FS");
+  }
+  //end read
+
+  WiFi.hostname("Weo-" + String(mqtt_topic));
+  Serial.println(wifiManager.getSSID());
+  Serial.println(wifiManager.getPassword());
+  // The extra parameters to be configured (can be either global or just in the setup)
+  // After connecting, parameter.getValue() will get you the configured value
+  // id/name placeholder/prompt default length
+
+  WiFiManagerParameter custom_mqtt_topic("topic", "Enter Room Name", mqtt_topic, 60);
+
+  //WiFiManager
+  //Local intialization. Once its business is done, there is no need to keep it around
+
+  //wifiManager.autoConnect();
+  //set config save notify callback
+  wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  //set static ip
+  //  wifiManager.setSTAStaticIPConfig(IPAddress(192,168,0,200), IPAddress(192,168,0,1), IPAddress(255,255,255,0));
+  //
+  //add all your parameters here
+  wifiManager.addParameter(&custom_mqtt_topic);
+
+  wifiManager.autoConnect();
+  //if you get here you have connected to the WiFi
+
+  //read updated parameters
+  strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+
+  //save the custom parameters to FS
+  if (shouldSaveConfig) {
+    Serial.println("saving config");
+    DynamicJsonBuffer jsonBuffer;
+    JsonObject& json = jsonBuffer.createObject();
+    json["mqtt_topic"] = mqtt_topic;
+
+    File configFile = SPIFFS.open("/config.json", "w");
+    if (!configFile) {
+      Serial.println("failed to open config file for writing");
+    }
+    json.printTo(Serial);
+    json.printTo(configFile);
+    configFile.close();
+    //end save
+  }
+  Serial.println("local ip");
+  Serial.println(WiFi.localIP());
+}
+String led = "";
+String delete_ID = "";
+// Setup loop end..
+// Callback Loop Begins...
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+
+  String p_message;
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+    p_message += (char)payload[i];
+    // convert payload into string
+    Serial.println();
+  }
+  led = p_message;
+  p_message == "default";
+  if (p_message == "reset") {
+    if (msg == "Please place secondary finger." || "Woo hoo! Primary finger enrolled successfully.") {
+      int p = -1;
+      p = finger.deleteModel(last_finger);  //DELETE LAST FINGER
+      Serial.println(last_finger);
+      prints();
+    }
+    delay(500);
+    ESP.restart();
+  }
+
+  if (p_message == "back") {
+    int k = -1;
+    k = finger.deleteModel(last_finger_sec);  //DELETE LAST FINGER
+    Serial.println(last_finger_sec);
+    prints();
+
+    int p = -1;
+    p = finger.deleteModel(last_finger);  //DELETE LAST FINGER
+    Serial.println(last_finger);
+    prints();
+    delay(500);
+    ESP.restart();
+  }
+
+
+  if (p_message == "enroll") {
+    enroll();
+    delay(500);
+    enroll_1();
+  }
+  if (p_message == "search") {
+    search_database();
+  }
+  if (p_message == "empty") {
+    empty_database();
+  }
+  if (p_message == "delete") {
+    delete_database();
+  }
+  if (p_message == "prints") {
+    prints();
+  }
+
+  if (p_message >= "0" && p_message <= "500" ) {
+    delete_ID = p_message;
+    delete_database();
+  }
+}
+
+void reconnect() {
+  // Loop until reconnect
+
+  while (!client.connected()) {
+
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+
+    if (client.connect((clientId + mqtt_topic).c_str())) {
+      Serial.println((clientId + mqtt_topic).c_str());
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+      client.subscribe(mqtt_topic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+
+      Serial.println(" try again in 5 seconds");
+      counter = counter + 5;
+      Serial.println(counter);
+      if (counter == 90) {
+        setup();
+      }
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+  strip.setPixelColor(0, strip.Color(0, 0, 0));
+  strip.show();
+  delay(500);
+}
+// Function Setup
+int timer = 0;
+int timer1 = 0;
+void setup() {
+  Serial.begin(115200);
+  strip.begin(); // This initializes the NeoPixel library.
+  counter = 0;
+  if (wifiManager.getSSID() != "") {
+    setup_wifi1();
+  } else {
+    setup_wifi();
+  }
+      setup_wifi();
+
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
+  fserial.begin(57600);
+
+  if (finger.begin()) {
+    finger.readParams(&params);
+    Serial.println("Found fingerprint sensor!");
+    Serial.print("Capacity: "); Serial.println(params.capacity);
+    Serial.print("Packet length: ");
+    Serial.println(FPM::packet_lengths[params.packet_len]);
+  } else {
+    Serial.println("Did not find fingerprint sensor :(");
+    while (1) delay(10);
+  }
+  strip.setPixelColor(0, strip.Color(0, 0, 0)); // Moderately white
+  strip.show();
+}
+void setup_wifi1() {
+  boolean wifiFound = false;
+  int i, n;
+
+  SPIFFS.open("/wifi.json", "r");
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.mode(WIFI_STA);
+  int len = ssid.length();
+  int leng = len + 1;
+  char SSID1[leng];
+  ssid.toCharArray(SSID1, leng);
+  int len1 = pwd.length();
+  int leng1 = len1 + 1;
+  char PWD[leng1];
+  pwd.toCharArray(PWD, leng1);
+  WiFi.begin(SSID1, PWD);
+  while (WiFi.status() != WL_CONNECTED) {
+    rainbowCycle(5);
+    Serial.print(".W.");
+    timer = timer + 1;
+    Serial.println(timer);
+    if (timer == 5) {
+      timer = 0;
+      ESP.restart();
+    }
+    randomSeed(micros());
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+void loop() {
+  if (!client.connected()) {
+    setup_wifi1();
+    reconnect();
+  }
+  client.loop();
+
+  search_database();
+}
+
+int search_database(void) {
+  int16_t p = -1;
+
+  /* first get the finger image */
+  Serial.println("searching");
+  while (p != FPM_OK) {
+    if (!client.connected()) {
+      setup_wifi1();
+      reconnect();
+    }
+    client.loop();       // MQTT MESSAGE CHECK
+    p = finger.getImage();
+    switch (p) {
+      case FPM_OK:
+        break;
+      case FPM_NOFINGER:
+        //        Serial.println("..");
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        break;
+      case FPM_IMAGEFAIL:
+        Serial.println("Imaging error");
+        break;
+      case FPM_TIMEOUT:
+        Serial.println("Timeout!");
+        break;
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        break;
+      default:
+        Serial.println("Unknown error");
+        break;
+    }
+    delay(10);
+  }
+
+  /* convert it */
+  p = finger.image2Tz();
+  switch (p) {
+    case FPM_OK:
+      Serial.println("Image converted");
+      break;
+    case FPM_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FPM_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FPM_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_TIMEOUT:
+      Serial.println("Timeout!");
+      return p;
+    case FPM_READ_ERROR:
+      Serial.println("Got wrong PID or length!");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+  //  Serial.println("Remove finger");
+  p = 0;
+  if (p != FPM_NOFINGER) {
+    p = finger.getImage();
+    delay(10);
+  }
+  /* search the database for the converted print */
+  uint16_t fid, score;
+  p = finger.searchDatabase(&fid, &score);
+  if (p == FPM_OK) {
+    Serial.println("Found a print match!");
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FPM_NOTFOUND) {
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    Serial.println("Did not find a match");
+    //        client.publish(mqtt_pub,"Did not find a match");
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    Serial.println("Timeout!");
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    return p;
+  }
+  else {
+    Serial.println("Unknown error");
+    return p;
+  }
+  String P25_str;
+  char P35[50];
+
+  P25_str = String(fid); //converting ftemp (the float variable above) to a string
+  P25_str.toCharArray(P35, P25_str.length() + 1); //packaging up the data to publish to mqtt whoa...
+  client.publish("search", P35);
+
+  strip.setPixelColor(0, strip.Color(0, 255, 0));
+  strip.show();
+  delay(500);
+  strip.setPixelColor(0, strip.Color(0, 0, 0));
+  strip.show();
+  delay(500);
+  Serial.print("Found ID #"); Serial.print(fid);
+  Serial.print(" with confidence of "); Serial.println(score);
+}
+
+/* ENROLLMENT SCRIPT*/
+
+void enroll() {
+  int16_t fid;
+  if (get_free_id(&fid))
+    enroll_finger(fid);
+}
+
+/*SEARCHING FREE IDs*/
+
+bool get_free_id(int16_t * fid) {
+  int16_t p = -1;
+  for (int page = 0; page < (params.capacity / FPM_TEMPLATES_PER_PAGE) + 1; page++) {
+    p = finger.getFreeIndex(page, fid);
+    switch (p) {
+      case FPM_OK:
+        if (*fid != FPM_NOFREEINDEX) {
+          Serial.print("Free slot at ID ");
+          Serial.println(*fid);
+          return true;
+        }
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error!");
+        return false;
+      case FPM_TIMEOUT:
+        return false;
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        return false;
+      default:
+        Serial.println("Unknown error!");
+        return false;
+    }
+    delay(10);
+  }
+
+  Serial.println("No free slots!");
+  return false;
+}
+
+int16_t enroll_finger(int16_t fid) {
+  int16_t p = -1;
+  Serial.println("Please place Primary finger to enroll");
+  client.publish(mqtt_pub, "Please place primary finger.");
+  while (p != FPM_OK) {
+    if (!client.connected()) {
+      //      setup_wifi1();
+      reconnect();
+    }
+    client.loop();
+    p = finger.getImage();
+    switch (p) {
+      case FPM_OK:
+        Serial.println("Image taken");
+        //        client.publish(mqtt_pub, "Image Taken");
+        break;
+      case FPM_NOFINGER:
+        //        Serial.println("P.");
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        client.publish(mqtt_pub, "Communication error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        delay(500);
+        enroll();
+        break;
+      case FPM_IMAGEFAIL:
+        Serial.println("Imaging error");
+        client.publish(mqtt_pub, "Imaging error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        //                enroll();
+        break;
+      case FPM_TIMEOUT:
+        Serial.println("Timeout!!!");
+        break;
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        client.publish(mqtt_pub, "Got wrong PID or length!");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, 0, 0, 0);
+        strip.show();
+        delay(500);
+        //                enroll();
+        break;
+      default:
+        Serial.println("Unknown error");
+        client.publish(mqtt_pub, "Unknown error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        //                enroll();
+        break;
+    }
+    delay(10);
+  }
+  p = finger.image2Tz(1);
+  switch (p) {
+    case FPM_OK:
+      //            client.loop();
+      Serial.println("Image converted");
+      //      client.publish(mqtt_pub, "Image converted");
+      break;
+    case FPM_IMAGEMESS:
+      Serial.println("Image too messy");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      delay(500);
+      client.publish(mqtt_pub, "Image too messy");
+      enroll();
+      return p;
+    case FPM_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      delay(500);
+      client.publish(mqtt_pub, "Communication error");
+      enroll();
+      return p;
+    case FPM_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      enroll();
+      return p;
+    case FPM_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      enroll();
+      return p;
+    case FPM_TIMEOUT:
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      Serial.println("Timeout!");
+      //      client.publish(mqtt_pub, "Timeout!");
+      //            enroll();
+      return p;
+    case FPM_READ_ERROR:
+      Serial.println("Got wrong PID or length!");
+      enroll();
+      return p;
+    default:
+      Serial.println("Unknown error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      client.publish(mqtt_pub, "Unknown error");
+      enroll();
+      return p;
+  }
+
+  Serial.println("Remove finger");
+  client.publish(mqtt_pub, "Remove primary finger.");
+  delay(1000);
+  p = 0;
+  while (p != FPM_NOFINGER) {
+    p = finger.getImage();
+    delay(10);
+  }
+  p = -1;
+  Serial.println("Place same finger again");
+  client.publish(mqtt_pub, "Please place primary finger again.");
+  while (p != FPM_OK) {
+    if (!client.connected()) {
+      //      setup_wifi1();
+      reconnect();
+    }
+    client.loop();
+    p = finger.getImage();
+    switch (p) {
+      case FPM_OK:
+        //                client.loop();
+        Serial.println("Image taken");
+        //        client.publish(mqtt_pub, "Image taken");
+        break;
+      case FPM_NOFINGER:
+        //        Serial.print(".");
+
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        client.publish(mqtt_pub, "Communication error");
+        break;
+      case FPM_IMAGEFAIL:
+        Serial.println("Imaging error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Imaging error");
+        enroll();
+        break;
+      case FPM_TIMEOUT:
+        Serial.println("Timeout!!!!!!");
+        //               client.publish(mqtt_pub,"Timeout!!!!!");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        //                enroll();
+        break;
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        enroll();
+        break;
+      default:
+        Serial.println("Unknown error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Unknow error");
+        enroll();
+        break;
+    }
+    delay(10);
+  }
+
+  // OK success!
+
+  p = finger.image2Tz(2);
+  //    client.loop();
+  switch (p) {
+    case FPM_OK:
+      Serial.println("Image converted");
+      break;
+    case FPM_IMAGEMESS:
+      Serial.println("Image too messy");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      client.publish(mqtt_pub, "Image too messy");
+      enroll();
+      return p;
+    case FPM_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      client.publish(mqtt_pub, "Communication error");
+      enroll();
+      return p;
+    case FPM_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      enroll();
+      return p;
+    case FPM_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      enroll();
+      return p;
+    case FPM_TIMEOUT:
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      Serial.println("Timeout!");
+      //      client.publish(mqtt_pub, "Timeout!");
+      //            enroll();
+      return false;
+    case FPM_READ_ERROR:
+      Serial.println("Got wrong PID or length!");
+      enroll();
+      return false;
+    default:
+      Serial.println("Unknown error");
+
+      return p;
+  }
+
+  // OK converted!
+
+  p = finger.createModel();
+  if (p == FPM_OK) {
+    Serial.println("Prints matched!");
+    //    client.publish(mqtt_pub, "Prints matched!");
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FPM_ENROLLMISMATCH) {
+    Serial.println("enrolling Fingerprints did not match");
+    client.publish(mqtt_pub, "Fingerprints did not match");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    enroll();
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    //        enroll();
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    enroll();
+    client.publish(mqtt_pub, "Unknow error");
+    return p;
+  }
+  Serial.print("ID "); Serial.println(fid);
+
+  p = finger.storeModel(fid);   // FID STORED
+
+  last_finger = fid;      // TEMPORARY STORED FID IN LAST FINGER
+
+  String P25_str;
+  char P1[50];
+
+  P25_str = String(fid); //converting ftemp (the float variable above) to a string
+  P25_str.toCharArray(P1, P25_str.length() + 1); //packaging up the data to publish to mqtt whoa...
+  if (p == FPM_OK) {
+    Serial.println("Stored!");
+    client.publish(mqtt_pub, "Woo hoo! Primary finger enrolled successfully.");
+    msg = "Woo hoo! Primary finger enrolled successfully.";
+    delay(200);
+    client.publish("finger_ID1", P1);
+    delay(1000);
+    strip.setPixelColor(0, strip.Color(0, 255, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    prints();
+    //    enroll_1();
+    return 0;
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FPM_BADLOCATION) {
+    Serial.println("Could not store in that location");
+    return p;
+  } else if (p == FPM_FLASHERR) {
+    Serial.println("Error writing to flash");
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    Serial.println("Timeout!");
+    client.publish(mqtt_pub, "Unknown error");
+    //        enroll();
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    Serial.println("Timeout!");
+    client.publish(mqtt_pub, "Already Stored or Technical issue!");
+    delay(1000);
+    enroll();
+    return p;
+  }
+}
+
+void enroll_1() {
+  int16_t fid;
+  if (get_free_id(&fid))
+    enroll_finger_1(fid);
+
+}
+
+int16_t enroll_finger_1(int16_t fid) {
+  int16_t p = -1;
+  delay(2000);
+  Serial.println("Please place secondary finger to enroll");
+  client.publish(mqtt_pub, "Please place secondary finger.");
+  msg = "Please place secondary finger.";
+  while (p != FPM_OK) {
+    if (!client.connected()) {
+      reconnect();
+    }
+    client.loop();
+    p = finger.getImage();
+    switch (p) {
+      case FPM_OK:
+        Serial.println("Image taken");
+        //        client.publish(mqtt_pub, "Image Taken");
+        break;
+      case FPM_NOFINGER:
+        //        Serial.println("S.");
+
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        client.publish(mqtt_pub, "Communication error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        enroll_1();
+        break;
+      case FPM_IMAGEFAIL:
+        Serial.println("Imaging error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Imaging error");
+        enroll_1();
+        break;
+      case FPM_TIMEOUT:
+        Serial.println("Timeout_Sec!");
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        break;
+      default:
+        Serial.println("Unknown error");
+        client.publish(mqtt_pub, "Unknown error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        enroll_1();
+        break;
+    }
+    delay(10);
+  }
+  // OK success!
+
+  p = finger.image2Tz(1);
+  switch (p) {
+    case FPM_OK:
+      Serial.println("Image converted");
+      //      client.publish(mqtt_pub, "Image converted");
+      break;
+    case FPM_IMAGEMESS:
+      Serial.println("Image too messy");
+      client.publish(mqtt_pub, "Image too messy");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      enroll_1();
+      return p;
+    case FPM_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      client.publish(mqtt_pub, "Communication error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      enroll_1();
+      return p;
+    case FPM_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_TIMEOUT:
+      Serial.println("Timeout!");
+      client.publish(mqtt_pub, "Timeout!");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      //            enroll_1();
+      return p;
+    case FPM_READ_ERROR:
+      Serial.println("Got wrong PID or length!");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  Serial.println("Remove finger");
+  client.publish(mqtt_pub, "Remove secondary finger.");
+  delay(1000);
+  p = 0;
+  while (p != FPM_NOFINGER) {
+    p = finger.getImage();
+    delay(10);
+  }
+  p = -1;
+  Serial.println("Place Secondary finger again");
+  client.publish(mqtt_pub, "Please place secondary finger again.");
+  while (p != FPM_OK) {
+    if (!client.connected()) {
+      //      setup_wifi1();
+      reconnect();
+    }
+    client.loop();
+    p = finger.getImage();
+    switch (p) {
+      case FPM_OK:
+        Serial.println("Image taken");
+        //        client.publish(mqtt_pub, "Image taken");
+        break;
+      case FPM_NOFINGER:
+        //        Serial.print(".");
+
+        break;
+      case FPM_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Communication error");
+        enroll_1();
+        break;
+      case FPM_IMAGEFAIL:
+        Serial.println("Imaging error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Imaging error");
+        enroll_1();
+        break;
+      case FPM_TIMEOUT:
+        Serial.println("Timeout_again_sec!");
+        //                client.publish(mqtt_pub,"Timeout_sec!!!");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        //                 enroll_1();
+        break;
+      case FPM_READ_ERROR:
+        Serial.println("Got wrong PID or length!");
+        break;
+      default:
+        Serial.println("Unknown error");
+        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        strip.show();
+        delay(500);
+        strip.setPixelColor(0, strip.Color(0, 0, 0));
+        strip.show();
+        delay(500);
+        client.publish(mqtt_pub, "Unknown error");
+        enroll_1();
+        break;
+    }
+    delay(10);
+  }
+
+  // OK success!
+
+  p = finger.image2Tz(2);
+  switch (p) {
+    case FPM_OK:
+      Serial.println("Image converted");
+      break;
+    case FPM_IMAGEMESS:
+      Serial.println("Image too messy");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      client.publish(mqtt_pub, "Image too messy");
+      enroll_1();
+      return p;
+    case FPM_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      delay(500);
+      client.publish(mqtt_pub, "Communication error");
+      enroll_1();
+      return p;
+    case FPM_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FPM_TIMEOUT:
+      Serial.println("Timeout!");
+      return false;
+    case FPM_READ_ERROR:
+      Serial.println("Got wrong PID or length!");
+      return false;
+    default:
+      Serial.println("Unknown error");
+      client.publish(mqtt_pub, "Unknown error");
+      strip.setPixelColor(0, strip.Color(255, 0, 0));
+      strip.show();
+      delay(500);
+      strip.setPixelColor(0, strip.Color(0, 0, 0));
+      strip.show();
+      delay(500);
+      enroll_1();
+      return p;
+  }
+  // OK converted!
+  p = finger.createModel();
+  if (p == FPM_OK) {
+    Serial.println("Prints matched!");
+    //    client.publish(mqtt_pub, "Prints matched!");
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Communication error");
+    enroll_1();
+    return p;
+  } else if (p == FPM_ENROLLMISMATCH) {
+    Serial.println("Fingerprints did not match");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Fingerprints did not match");
+    enroll_1();
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Timeout");
+    //        enroll_1();
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    enroll_1();
+    return p;
+  }
+
+  Serial.print("ID "); Serial.println(fid);
+  p = finger.storeModel(fid);     // STORED SECONDARY FINGER
+  last_finger_sec = fid;
+
+  if (p == FPM_OK) {
+    Serial.println("Stored!");
+    strip.setPixelColor(0, strip.Color(0, 255, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Secondary finger enrolled successfully!");
+    msg = "Secondary finger enrolled successfully!";
+
+    String P25_str;
+    char P25[50];
+    P25_str = String(fid); //converting ftemp (the float variable above) to a string
+    P25_str.toCharArray(P25, P25_str.length() + 1); //packaging up the data to publish to mqtt whoa...
+    client.publish("finger_ID2", P25);
+    prints();
+    delay(1500);
+    return 0;
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Communication error");
+    enroll_1();
+    return p;
+  } else if (p == FPM_BADLOCATION) {
+    Serial.println("Could not store in that location");
+    enroll_1();
+    //    return p;
+  } else if (p == FPM_FLASHERR) {
+    Serial.println("Error writing to flash");
+    enroll_1();
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Timeout!");
+    enroll_1();
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Got wrong PID or length!");
+    enroll_1();
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    strip.setPixelColor(0, strip.Color(255, 0, 0));
+    strip.show();
+    delay(500);
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.show();
+    delay(500);
+    client.publish(mqtt_pub, "Already Stored or Technical issue!");
+    delay(1000);
+    enroll_1();
+    return p;
+  }
+}
+
+/* EMPTY DATABASE*/
+
+void empty_database(void) {
+  int16_t p = finger.emptyDatabase();
+  if (p == FPM_OK) {
+    Serial.println("Database empty!");
+    prints();
+  }
+  else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.print("Communication error!");
+  }
+  else if (p == FPM_DBCLEARFAIL) {
+    Serial.println("Could not clear database!");
+  }
+  else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+  }
+  else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+  }
+  else {
+    Serial.println("Unknown error");
+  }
+}
+
+/*DELETE SINGLE FID*/
+
+void delete_database() {
+  int fid = 0;
+  fid = delete_ID.toInt();
+  Serial.print("Deleting ID #");
+  Serial.println(fid);
+  deleteFingerprint(fid);
+  while (Serial.read() != -1) delay(10);
+}
+
+int deleteFingerprint(int fid) {
+  int p = -1;
+  p = finger.deleteModel(fid);
+  if (p == FPM_OK) {
+    Serial.println("Deleted!");
+    prints();
+  } else if (p == FPM_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FPM_BADLOCATION) {
+    Serial.println("Could not delete in that location");
+    return p;
+  } else if (p == FPM_FLASHERR) {
+    Serial.println("Error writing to flash");
+    return p;
+  } else if (p == FPM_TIMEOUT) {
+    Serial.println("Timeout!");
+    return p;
+  } else if (p == FPM_READ_ERROR) {
+    Serial.println("Got wrong PID or length!");
+    return p;
+  } else {
+    Serial.print("Unknown error: 0x"); Serial.println(p, HEX);
+    return p;
+  }
+}
+
+/*COUNTS FID*/
+
+void prints() {
+  //    while (Serial.read() != -1);
+  Serial.println("number of stored templates...");
+  uint16_t template_cnt;
+  if (!get_template_count(&template_cnt))
+    return;
+  Serial.print(template_cnt);
+  Serial.println(" print(s) in module database.");
+  String P25_str;
+  char P25[50];
+  P25_str = String(template_cnt); //converting ftemp (the float variable above) to a string
+  P25_str.toCharArray(P25, P25_str.length() + 1); //packaging up the data to publish to mqtt whoa...
+  client.publish("prints", P25);
+}
+
+bool get_template_count(uint16_t * count) {
+  int16_t p = finger.getTemplateCount(count);
+  if (p == FPM_OK) {
+    return true;
+  }
+  else {
+    Serial.print("Unknown error: ");
+    Serial.println(p);
+    return false;
+  }
+}
+
+
+
+void rainbowCycle(uint8_t wait) {
+  uint16_t i, j;
+  for (j = 0; j < 256 * 4; j++) { // 5 cycles of all colors on wheel
+    for (i = 0; i < strip.numPixels(); i++) {
+      strip.setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + j) & 255));
+    }
+    strip.show();
+    delay(wait);
+  }
+}
+uint32_t Wheel(byte WheelPos) {
+  WheelPos = 255 - WheelPos;
+  if (WheelPos < 85) {
+    return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  }
+  if (WheelPos < 170) {
+    WheelPos -= 85;
+    return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+  WheelPos -= 170;
+  return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
